@@ -1,0 +1,326 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <title>Ticket Lookup & QR Scanner (mit CSV-Upload)</title>
+  <style>
+    :root { --radius: 14px; }
+    html, body { margin:0; padding:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji","Segoe UI Emoji"; background:#0b1020; color:#eef2ff; }
+    header { padding:16px; text-align:center; background:linear-gradient(180deg, #131a35, #0b1020); position:sticky; top:0; z-index:2; border-bottom:1px solid rgba(255,255,255,.06); }
+    h1 { font-size:18px; margin:0; }
+    main { padding:16px; max-width:1000px; margin:0 auto; }
+    .card { background:#111834; border:1px solid rgba(255,255,255,.08); border-radius:var(--radius); padding:16px; box-shadow:0 8px 24px rgba(0,0,0,.25); }
+    .grid { display:grid; gap:16px; }
+    @media(min-width:980px) { .grid { grid-template-columns: 1.1fr .9fr; } }
+    video, canvas { width:100%; border-radius:12px; background:#020617; }
+    .lookup { display:flex; gap:8px; }
+    .lookup input { flex:1; padding:12px 14px; border-radius:12px; border:1px solid rgba(255,255,255,.12); background:#0b122b; color:#e5e7eb; outline:none; }
+    .lookup button { padding:12px 14px; border-radius:12px; border:0; background:#3b82f6; color:white; font-weight:600; }
+    .result { padding:12px 14px; border-radius:12px; background:#0b122b; border:1px solid rgba(255,255,255,.08); font-size:14px; }
+    .pill { display:inline-block; padding:6px 10px; border-radius:999px; background:#0f172a; border:1px solid rgba(255,255,255,.1); font-size:12px; color:#cbd5e1 }
+    .muted { color:#9aa4bf; }
+    .success { color:#34d399; }
+    .danger { color:#f87171; }
+    footer { text-align:center; padding:24px; color:#94a3b8; }
+    .small { font-size:12px; }
+    .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+    .btn-secondary { padding:10px 12px; border-radius:10px; border:1px solid rgba(255,255,255,.15); background:#0b122b; color:#e5e7eb; }
+    .dropzone {
+      margin-top:8px; padding:16px; border:2px dashed rgba(255,255,255,.2); border-radius:12px; text-align:center;
+      background:#0b122b;
+    }
+    select { background:#0b122b; color:#e5e7eb; border:1px solid rgba(255,255,255,.15); border-radius:10px; padding:8px; }
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+</head>
+<body>
+  <header>
+    <h1>Ticket Lookup & QR Scanner</h1>
+    <div class="small muted">
+      Datensätze geladen: <span id="count">0</span> ·
+      Quelle: <span id="sourceLabel">Keine Daten</span> ·
+      Zuletzt aktualisiert: <span id="updatedLabel">–</span>
+    </div>
+  </header>
+
+  <main class="grid">
+    <section class="card">
+      <h2>QR-Code scannen</h2>
+      <p class="muted small">Erlaube der Seite die Kamera zu nutzen. Halte den QR-Code ins Bild.</p>
+      <video id="video" playsinline></video>
+      <canvas id="canvas" style="display:none;"></canvas>
+      <div id="scanStatus" class="small muted" style="margin-top:8px;">Scanner bereit…</div>
+      <div id="scanResult" class="result" style="margin-top:8px;">Noch kein Code erfasst.</div>
+    </section>
+
+    <section class="card">
+      <h2>Manuelle Eingabe & Datensatz laden</h2>
+      <div class="lookup">
+        <input id="ticketInput" type="text" placeholder="Ticket-ID eingeben oder einfügen">
+        <button id="lookupBtn">Prüfen</button>
+      </div>
+      <div id="lookupResult" class="result" style="margin-top:8px;">Gib eine Ticket-ID ein.</div>
+
+      <div class="row" style="margin-top:12px;">
+        <button id="loadCsvBtn" class="btn-secondary">CSV laden/aktualisieren</button>
+        <input id="csvFile" type="file" accept=".csv,.txt" style="display:none;">
+        <button id="clearLocalBtn" class="btn-secondary">Lokales Mapping löschen</button>
+      </div>
+      <div id="dropzone" class="dropzone small muted">CSV hierher ziehen & ablegen oder Button oben nutzen.</div>
+
+      <div style="margin-top:12px;" class="small">
+        <div class="pill">Ticket-Spalte: <strong id="ticketColPill">–</strong></div>
+        <div class="pill">Item-Spalte: <strong id="itemColPill">–</strong></div>
+      </div>
+
+      <div id="colPicker" style="display:none; margin-top:12px;" class="small">
+        <div><strong>Spalten manuell wählen (optional):</strong></div>
+        <div class="row" style="margin-top:6px;">
+          <label>Ticket-ID:&nbsp;<select id="ticketSelect"></select></label>
+          <label>Item-Name:&nbsp;<select id="itemSelect"></select></label>
+          <button id="applyColsBtn" class="btn-secondary">Spalten anwenden</button>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="small">© 2025 – Upload-fähiger Ticket Lookup</footer>
+
+  <script>
+  let TICKET_TO_ITEM = {};
+  let detectedTicket = "–";
+  let detectedItem = "–";
+
+  // Try restore
+  try {
+    const saved = localStorage.getItem("ticket_mapping_v1");
+    if (saved) {
+      const parsed = JSON.parse(saved);
+      if (parsed && parsed.mapping) {
+        TICKET_TO_ITEM = parsed.mapping;
+        detectedTicket = parsed.ticketCol || detectedTicket;
+        detectedItem = parsed.itemCol || detectedItem;
+        document.getElementById('sourceLabel').textContent = "Lokal gespeichert";
+        document.getElementById('updatedLabel').textContent = new Date(parsed.updatedAt).toLocaleString();
+        document.getElementById('count').textContent = Object.keys(TICKET_TO_ITEM).length;
+        document.getElementById('ticketColPill').textContent = detectedTicket;
+        document.getElementById('itemColPill').textContent = detectedItem;
+      }
+    }
+  } catch(e) {}
+
+  function normalize(id) {
+    if (!id) return "";
+    id = (""+id).trim();
+    try {
+      const url = new URL(id);
+      const params = new URLSearchParams(url.search);
+      let guess = params.get("ticket") || params.get("id") || params.get("ticket_id");
+      if (guess) return guess.trim();
+    } catch(e) {}
+    return id;
+  }
+
+  function lookup(id) {
+    const key = normalize(id);
+    if (!key) return {ok:false, message:"Leere Ticket-ID."};
+    const val = TICKET_TO_ITEM[key];
+    if (val !== undefined) { 
+      return {ok:true, id:key, item:val}; 
+    } else { 
+      const num = parseInt(key, 10);
+      if (!Number.isNaN(num)) {
+        const alt = String(num);
+        if (TICKET_TO_ITEM[alt] !== undefined) return {ok:true, id:alt, item:TICKET_TO_ITEM[alt]};
+      }
+      return {ok:false, id:key, message:"Keine Zuordnung gefunden."}; 
+    }
+  }
+
+  const input = document.getElementById('ticketInput');
+  const btn = document.getElementById('lookupBtn');
+  const lookupResult = document.getElementById('lookupResult');
+  function renderLookup(res) { 
+    if (res.ok) { 
+      lookupResult.innerHTML = `<div><strong>Ticket-ID:</strong> ${res.id}</div><div><strong>Item:</strong> <span class="success">${res.item}</span></div>`;
+    } else { 
+      lookupResult.innerHTML = `<div><strong>Ticket-ID:</strong> ${res.id || "–"}</div><div class="danger">${res.message}</div>`;
+    }
+  }
+  btn.addEventListener('click', () => renderLookup(lookup(input.value)));
+  input.addEventListener('keydown', (e) => { if (e.key === 'Enter') renderLookup(lookup(input.value)); });
+
+  // Camera & Scanner
+  const video = document.getElementById('video');
+  const canvas = document.getElementById('canvas');
+  const ctx = canvas.getContext('2d');
+  const scanStatus = document.getElementById('scanStatus');
+  const scanResult = document.getElementById('scanResult');
+
+  async function startCamera() { 
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+      video.srcObject = stream;
+      await video.play();
+      scanStatus.textContent = "Kamera aktiv.";
+      tick();
+    } catch (e) {
+      scanStatus.textContent = "Kamera nicht verfügbar oder gesperrt.";
+    }
+  }
+  function tick() {
+    if (video.readyState === video.HAVE_ENOUGH_DATA) { 
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      try {
+        const code = jsQR(imageData.data, imageData.width, imageData.height);
+        if (code && code.data) { 
+          const value = code.data;
+          const res = lookup(value);
+          if (res.ok) {
+            scanResult.innerHTML = `<div><strong>Ticket-ID:</strong> ${res.id}</div><div><strong>Item:</strong> <span class="success">${res.item}</span></div>`;
+          } else {
+            scanResult.innerHTML = `<div><strong>Gelesen:</strong> ${value}</div><div class="danger">${res.message}</div>`;
+          }
+        }
+      } catch (e) {}
+    }
+    requestAnimationFrame(tick);
+  }
+  if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) startCamera();
+
+  // CSV upload
+  const csvInput = document.getElementById('csvFile');
+  const loadBtn = document.getElementById('loadCsvBtn');
+  const clearBtn = document.getElementById('clearLocalBtn');
+  const dropzone = document.getElementById('dropzone');
+  const colPicker = document.getElementById('colPicker');
+  const ticketSelect = document.getElementById('ticketSelect');
+  const itemSelect = document.getElementById('itemSelect');
+  const applyColsBtn = document.getElementById('applyColsBtn');
+  let lastCSV = null;
+
+  loadBtn.addEventListener('click', () => csvInput.click());
+  csvInput.addEventListener('change', (e) => handleFiles(e.target.files));
+
+  function handleFiles(files) {
+    if (!files || !files[0]) return;
+    const file = files[0];
+    Papa.parse(file, {
+      header: true,
+      dynamicTyping: false,
+      skipEmptyLines: true,
+      complete: (res) => onCSVParsed(res, file.name),
+      error: (err) => alert("CSV Fehler: " + err)
+    });
+  }
+
+  function onCSVParsed(res, filename) {
+    if (!res || !res.meta || !res.meta.fields) {
+      alert("Konnte Spaltenüberschriften nicht erkennen.");
+      return;
+    }
+    const headers = res.meta.fields;
+    const rows = res.data || [];
+    lastCSV = { headers, rows };
+
+    // selects
+    ticketSelect.innerHTML = "";
+    itemSelect.innerHTML = "";
+    headers.forEach(h => {
+      const o1 = document.createElement('option'); o1.value = h; o1.textContent = h; ticketSelect.appendChild(o1);
+      const o2 = document.createElement('option'); o2.value = h; o2.textContent = h; itemSelect.appendChild(o2);
+    });
+
+    // auto detect
+    const tGuess = detectTicket(headers);
+    const iGuess = detectItem(headers);
+    ticketSelect.value = tGuess;
+    itemSelect.value = iGuess;
+    colPicker.style.display = "block";
+    document.getElementById('sourceLabel').textContent = "Hochgeladene CSV (" + filename + ")";
+  }
+
+  function detectTicket(headers) {
+    const score = (c) => {
+      const lc = c.toLowerCase();
+      let s = 0;
+      if (lc.includes("ticket")) s += 2;
+      if (/\bid\b/.test(lc)) s += 2;
+      if (lc.includes("qr")) s += 1;
+      if (lc.includes("code")) s += 1;
+      if (["id","ticket","ticket id","ticket_id","ticket-id"].includes(lc)) s += 3;
+      return s;
+    };
+    return headers.slice().sort((a,b)=>score(b)-score(a))[0];
+  }
+  function detectItem(headers) {
+    const score = (c) => {
+      const lc = c.toLowerCase();
+      let s = 0;
+      ["item","artikel","name","produkt","product","buchung","tarif","paket","ticketname","event","kategorie"].forEach(kw=>{ if (lc.includes(kw)) s+=1; });
+      if (/\bid\b/.test(lc)) s -= 1;
+      return s;
+    };
+    return headers.slice().sort((a,b)=>score(b)-score(a))[0];
+  }
+
+  function buildMapping(rows, ticketCol, itemCol) {
+    const map = {};
+    rows.forEach(r => {
+      const k = String(r[ticketCol] ?? "").trim();
+      const v = String(r[itemCol] ?? "").trim();
+      if (k) map[k] = v;
+    });
+    return map;
+  }
+
+  applyColsBtn.addEventListener('click', () => {
+    if (!lastCSV) return;
+    const tCol = ticketSelect.value;
+    const iCol = itemSelect.value;
+    const newMap = buildMapping(lastCSV.rows, tCol, iCol);
+    if (!Object.keys(newMap).length) {
+      alert("Die gewählten Spalten ergeben keine Zuordnung.");
+      return;
+    }
+    TICKET_TO_ITEM = newMap;
+    detectedTicket = tCol;
+    detectedItem = iCol;
+    document.getElementById('ticketColPill').textContent = detectedTicket;
+    document.getElementById('itemColPill').textContent = detectedItem;
+    document.getElementById('count').textContent = Object.keys(TICKET_TO_ITEM).length;
+    document.getElementById('updatedLabel').textContent = new Date().toLocaleString();
+    try {
+      localStorage.setItem("ticket_mapping_v1", JSON.stringify({
+        mapping: TICKET_TO_ITEM,
+        ticketCol: detectedTicket,
+        itemCol: detectedItem,
+        updatedAt: Date.now()
+      }));
+    } catch(e) {}
+    alert("Datensatz übernommen. Scanner & Suche nutzen nun die neue CSV.");
+  });
+
+  // Drag & drop
+  ['dragenter','dragover','dragleave','drop'].forEach(evt => dropzone.addEventListener(evt, e=>{ e.preventDefault(); e.stopPropagation(); }));
+  ['dragenter','dragover'].forEach(evt => dropzone.addEventListener(evt, ()=> dropzone.style.borderColor = '#3b82f6'));
+  ['dragleave','drop'].forEach(evt => dropzone.addEventListener(evt, ()=> dropzone.style.borderColor = 'rgba(255,255,255,.2)'));
+  dropzone.addEventListener('drop', (e)=>{
+    const dt = e.dataTransfer;
+    if (dt && dt.files && dt.files.length) handleFiles(dt.files);
+  });
+
+  // Clear local mapping
+  clearBtn.addEventListener('click', ()=>{
+    localStorage.removeItem("ticket_mapping_v1");
+    alert("Lokales Mapping gelöscht. Bitte CSV neu laden.");
+    location.reload();
+  });
+  </script>
+</body>
+</html>
