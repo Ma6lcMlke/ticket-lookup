@@ -1,0 +1,605 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+<title>Ticket Lookup – QR, CSV, Offset & Namenssuche</title>
+
+<!-- Minimaler, dunkler Stil -->
+<style>
+:root { --radius: 14px; }
+html, body { margin:0; padding:0; background:#0b1020; color:#eef2ff;
+font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji","Segoe UI Emoji"; }
+header { padding:16px; text-align:center; background:linear-gradient(180deg, #131a35, #0b1020);
+position:sticky; top:0; z-index:2; border-bottom:1px solid rgba(255,255,255,.06); }
+h1 { font-size:18px; margin:0; }
+main { padding:16px; max-width:1100px; margin:0 auto; display:grid; gap:16px; }
+@media(min-width:1100px) { main { grid-template-columns: 1.1fr .9fr; } }
+.card { background:#111834; border:1px solid rgba(255,255,255,.08); border-radius:var(--radius); padding:16px; box-shadow:0 8px 24px rgba(0,0,0,.25); }
+.lookup { display:flex; gap:8px; }
+.lookup input { flex:1; padding:12px 14px; border-radius:12px; border:1px solid rgba(255,255,255,.12); background:#0b122b; color:#e5e7eb; outline:none; }
+.lookup button, .btn { padding:12px 14px; border-radius:12px; border:0; background:#3b82f6; color:white; font-weight:600; cursor:pointer; }
+.btn.secondary { background:#334155; }
+.result { padding:12px 14px; border-radius:12px; background:#0b122b; border:1px solid rgba(255,255,255,.08); font-size:14px; }
+.small { font-size:12px; color:#9aa4bf; }
+.pill { display:inline-block; padding:6px 10px; border-radius:999px; background:#0f172a; border:1px solid rgba(255,255,255,.1); font-size:12px; color:#cbd5e1; margin-right:6px; }
+.row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+.two { display:grid; grid-template-columns: 1fr 1fr; gap:8px; }
+.ticket { background:#0b122b; border:1px solid rgba(255,255,255,.08); border-radius:10px; padding:10px; margin:8px 0; }
+.ticket h4 { margin:0 0 8px 0; font-size:14px; }
+video, canvas { width:100%; border-radius:12px; background:#020617; }
+input[type="number"] { width:90px; background:#0b122b; color:#e5e7eb; border:1px solid rgba(255,255,255,.15); border-radius:8px; padding:6px 8px; }
+select { background:#0b122b; color:#e5e7eb; border:1px solid rgba(255,255,255,.15); border-radius:10px; padding:8px; }
+.danger { color:#f87171; }
+</style>
+
+<!-- QR & CSV Libraries (CDN) -->
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+</head>
+<body>
+<header>
+<h1>Ticket Lookup & QR Scanner</h1>
+<div class="small">
+Tickets: <span id="count">0</span> ·
+Personen-Keys: <span id="nameCount">0</span> ·
+Quelle: <span id="sourceLabel">—</span>
+</div>
+</header>
+
+<main>
+<!-- Linke Spalte: Scanner -->
+<section class="card">
+<h2>QR-Code scannen</h2>
+<video id="video" playsinline></video>
+<canvas id="canvas" style="display:none"></canvas>
+<div id="scanStatus" class="small" style="margin-top:8px">Scanner bereit…</div>
+
+<div class="small" style="margin-top:8px; display:flex; gap:12px; align-items:center; flex-wrap:wrap;">
+<label><input type="checkbox" id="groupToggle"> Gruppieren & aufsummieren</label>
+<label><input type="checkbox" id="applyOffsetToggle" checked> Ticket-ID-Offset anwenden</label>
+<label>Offset: <input id="offsetInput" type="number" step="1" value="-1"></label>
+</div>
+
+<div id="scanResult" class="result" style="margin-top:8px">Noch kein Code erfasst.</div>
+</section>
+
+<!-- Rechte Spalte: Manuelle Suche + CSV -->
+<section class="card">
+<h2>Manuell prüfen & CSV laden</h2>
+<div class="lookup">
+<input id="ticketInput" type="text" placeholder="Ticket-ID (BestellID) oder komplette QR-URL einfügen">
+<button id="lookupBtn">Prüfen</button>
+</div>
+<div id="lookupResult" class="result" style="margin-top:8px">Gib eine Ticket-ID oder die komplette QR-URL ein.</div>
+
+<div class="row" style="margin-top:12px;">
+<button id="loadCsvBtn" class="btn">CSV laden/aktualisieren</button>
+<input id="csvFile" type="file" accept=".csv,.txt" style="display:none;">
+<button id="clearLocalBtn" class="btn secondary">Lokales Mapping löschen</button>
+</div>
+
+<div id="dropzone" class="result small" style="margin-top:8px;">CSV hierher ziehen & ablegen oder Button oben nutzen.</div>
+
+<div style="margin-top:12px;" class="small">
+<span class="pill">Ticket-Spalte: <strong id="ticketColPill">–</strong></span>
+<span class="pill">Item-Spalte: <strong id="itemColPill">–</strong></span>
+<span class="pill">Mengen-Spalte: <strong id="qtyColPill">–</strong></span>
+<span class="pill">Vorname: <strong id="firstColPill">–</strong></span>
+<span class="pill">Nachname: <strong id="lastColPill">–</strong></span>
+</div>
+
+<div id="colPicker" style="display:none; margin-top:12px;" class="small">
+<div><strong>Spalten manuell wählen (optional):</strong></div>
+<div class="row" style="margin-top:6px; flex-wrap:wrap;">
+<label>Ticket:&nbsp;<select id="ticketSelect"></select></label>
+<label>Item:&nbsp;<select id="itemSelect"></select></label>
+<label>Menge:&nbsp;<select id="qtySelect"><option value="">(keine)</option></select></label>
+<label>Vorname:&nbsp;<select id="firstSelect"></select></label>
+<label>Nachname:&nbsp;<select id="lastSelect"></select></label>
+<button id="applyColsBtn" class="btn">Spalten anwenden</button>
+</div>
+</div>
+</section>
+
+<!-- Dritte Karte: Namenssuche -->
+<section class="card" style="grid-column: 1 / -1;">
+<h2>Suche nach Name</h2>
+<div class="two">
+<input id="firstInput" type="text" placeholder="First Name">
+<input id="lastInput" type="text" placeholder="Last Name">
+</div>
+<div class="row" style="margin-top:8px;">
+<button id="nameSearchBtn" class="btn">Suchen</button>
+<label><input type="checkbox" id="prefixMatch"> Teilweise Übereinstimmung</label>
+</div>
+<div id="nameResult" class="result" style="margin-top:8px;">Gib Vor- und Nachname ein und klicke auf „Suchen“.</div>
+</section>
+</main>
+
+<script>
+/* ==============================
+KONFIG & HILFSFUNKTIONEN
+============================== */
+
+// OPTIONAL: Wenn du einen Export fest einbauen willst, kannst du hier Mappings einbetten.
+// Standardmäßig leer – lade deine CSV über den Button.
+let TICKET_TO_ITEMS_RAW = {}; // { "<TicketId>": [ {name, qty}, ... ] }
+let NAME_TO_TICKETS_RAW = {}; // { "vorname nachname": [ {ticketId, name, qty, first, last}, ... ] }
+
+const $ = (id) => document.getElementById(id);
+const sourceLabel = $("sourceLabel");
+const countEl = $("count");
+const nameCountEl = $("nameCount");
+
+function escapeHtml(s) {
+const map = {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'};
+return String(s ?? "").replace(/[&<>"']/g, m => map[m]);
+}
+
+function refreshHeader() {
+countEl.textContent = Object.keys(TICKET_TO_ITEMS_RAW).length;
+nameCountEl.textContent = Object.keys(NAME_TO_TICKETS_RAW).length;
+}
+
+// QR-/URL-Parser → Ticket-ID (inkl. „bestellid“)
+function extractTicketId(raw) {
+if (!raw) return "";
+let s = String(raw).trim();
+try {
+if (!/^https?:\/\//i.test(s) && s.includes(".")) s = "https://" + s;
+const u = new URL(s);
+const params = new URLSearchParams(u.search);
+const keys = ["bestellid","ticket_id","ticket","id","tid"];
+for (const k of keys) {
+const v = params.get(k) || params.get(k.toUpperCase());
+if (v) return v.trim();
+}
+for (const [p, v] of params.entries()) {
+if (["bestellid","ticket_id","ticket","id","tid"].includes(p.toLowerCase()) && v) return v.trim();
+}
+} catch(e) {}
+// Fallback: evtl. Querystring manuell
+const qIndex = s.indexOf("?");
+if (qIndex !== -1) {
+const parts = s.slice(qIndex+1).split("&");
+for (const part of parts) {
+const [k, v] = part.split("=") || [];
+if (!k) continue;
+const key = decodeURIComponent(k).toLowerCase();
+const val = v ? decodeURIComponent(v) : "";
+if (["bestellid","ticket_id","ticket","id","tid"].includes(key) && val) return val.trim();
+}
+}
+return s; // evtl. war bereits eine nackte Zahl/ID
+}
+
+// Offset-Handling (z. B. QR=CSV+1 → Offset -1)
+let applyOffset = true;
+let idOffset = -1;
+try {
+const saved = JSON.parse(localStorage.getItem("ticket_id_offset_v1") || "{}");
+if (typeof saved?.apply === "boolean") applyOffset = saved.apply;
+if (typeof saved?.offset === "number") idOffset = saved.offset;
+} catch(_) {}
+
+const applyOffsetToggle = $("applyOffsetToggle");
+const offsetInput = $("offsetInput");
+applyOffsetToggle.checked = applyOffset;
+offsetInput.value = String(idOffset);
+
+function persistOffset() {
+localStorage.setItem("ticket_id_offset_v1", JSON.stringify({ apply: applyOffset, offset: idOffset }));
+}
+applyOffsetToggle.addEventListener("change", () => { applyOffset = applyOffsetToggle.checked; persistOffset(); });
+offsetInput.addEventListener("input", () => {
+const v = parseInt(offsetInput.value, 10);
+if (!Number.isNaN(v)) { idOffset = v; persistOffset(); }
+});
+
+// Gruppierung für Items
+const groupToggle = $("groupToggle");
+function groupItems(list) {
+const m = {};
+(list || []).forEach(it => {
+const n = String(it?.name || "").trim();
+const q = Math.max(1, Number(it?.qty) || 1);
+m[n] = (m[n] || 0) + q;
+});
+return Object.entries(m).map(([name, qty]) => ({ name, qty }));
+}
+
+// Ticket-Key normalisieren (Offset, numerische Äquivalenzen)
+function normalizeToKey(input) {
+const rawId = extractTicketId(input);
+if (!rawId) return "";
+if (TICKET_TO_ITEMS_RAW?.[rawId] !== undefined) return rawId;
+
+const n = parseInt(rawId, 10);
+if (!Number.isNaN(n)) {
+const nStr = String(n);
+if (TICKET_TO_ITEMS_RAW?.[nStr] !== undefined) return nStr;
+
+if (applyOffset && Number.isInteger(idOffset) && idOffset !== 0) {
+const off = n + idOffset;
+if (isFinite(off)) {
+const offStr = String(off);
+if (TICKET_TO_ITEMS_RAW?.[offStr] !== undefined) return offStr;
+}
+}
+// Finde numerische Keys, die als String gespeichert sind
+for (const k in TICKET_TO_ITEMS_RAW) {
+if (/^\d+$/.test(k) && parseInt(k, 10) === n) return k;
+}
+}
+return rawId;
+}
+
+// Lookup per Ticket
+function lookupItems(input) {
+const key = normalizeToKey(input);
+const raw = TICKET_TO_ITEMS_RAW[key];
+if (Array.isArray(raw) && raw.length) {
+const items = (groupToggle && groupToggle.checked)
+? groupItems(raw)
+: raw.map(x => ({ name: x.name, qty: Math.max(1, Number(x.qty) || 1) }));
+return { ok: true, id: key, items };
+}
+return { ok: false, id: key, message: "Keine Zuordnung gefunden." };
+}
+
+function renderItemsList(el, res) {
+if (res.ok) {
+const lines = res.items.map(it => `<li>${escapeHtml(it.name)} <span class="small">× ${it.qty}</span></li>`).join("");
+el.innerHTML =
+`<div><strong>Ticket-ID:</strong> ${escapeHtml(res.id)}</div>
+<div><strong>Artikel:</strong></div>
+<ul>${lines}</ul>`;
+} else {
+el.innerHTML =
+`<div><strong>Ticket-ID (extrahiert):</strong> ${escapeHtml(res.id || "–")}</div>
+<div class="danger">${escapeHtml(res.message)}</div>`;
+}
+}
+
+/* ==============================
+MANUELLE SUCHE
+============================== */
+const ticketInput = $("ticketInput");
+const lookupBtn = $("lookupBtn");
+const lookupResult = $("lookupResult");
+lookupBtn.addEventListener("click", () => renderItemsList(lookupResult, lookupItems(ticketInput.value)));
+ticketInput.addEventListener("keydown", (e) => { if (e.key === "Enter") lookupBtn.click(); });
+if (groupToggle) groupToggle.addEventListener("change", () => {
+const v = ticketInput.value.trim();
+if (v) renderItemsList(lookupResult, lookupItems(v));
+});
+
+/* ==============================
+QR-SCANNER
+============================== */
+const video = $("video");
+const canvas = $("canvas");
+const ctx = canvas.getContext("2d");
+const scanStatus = $("scanStatus");
+const scanResult = $("scanResult");
+
+async function startCamera() {
+try {
+const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+video.srcObject = stream;
+await video.play();
+scanStatus.textContent = "Kamera aktiv.";
+tick();
+} catch (e) {
+scanStatus.textContent = "Kamera nicht verfügbar oder gesperrt.";
+}
+}
+function tick() {
+if (video.readyState === video.HAVE_ENOUGH_DATA) {
+canvas.width = video.videoWidth;
+canvas.height = video.videoHeight;
+ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+try {
+const code = jsQR(imageData.data, imageData.width, imageData.height);
+if (code && code.data) {
+renderItemsList(scanResult, lookupItems(code.data));
+}
+} catch (e) {}
+}
+requestAnimationFrame(tick);
+}
+if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) startCamera();
+
+/* ==============================
+NAMENSSUCHE
+============================== */
+const firstInput = $("firstInput");
+const lastInput = $("lastInput");
+const nameSearchBtn = $("nameSearchBtn");
+const prefixMatch = $("prefixMatch");
+const nameResult = $("nameResult");
+
+function normalizeName(f, l) {
+return (String(f || "").trim() + " " + String(l || "").trim()).trim().toLowerCase();
+}
+
+function groupPerTicket(entries) {
+const byT = {};
+entries.forEach(e => { (byT[e.ticketId] ||= []).push({ name: e.name, qty: e.qty }); });
+const out = [];
+for (const [tid, items] of Object.entries(byT)) {
+if (groupToggle && groupToggle.checked) {
+const m = {};
+items.forEach(it => { m[it.name] = (m[it.name] || 0) + (Number(it.qty) || 1); });
+out.push({ ticketId: tid, items: Object.entries(m).map(([n,q]) => ({ name:n, qty:q })) });
+} else {
+out.push({ ticketId: tid, items });
+}
+}
+return out;
+}
+
+function searchByName(f, l, allowPrefix=false) {
+const key = normalizeName(f, l);
+if (!key) return { ok:false, message:"Bitte Vor- und Nachname eingeben." };
+let entries = NAME_TO_TICKETS_RAW[key];
+if (!entries && allowPrefix) {
+const res = [];
+const [pf, pl] = key.split(" ");
+const starts = (s,p) => s && p && s.startsWith(p);
+for (const [k, arr] of Object.entries(NAME_TO_TICKETS_RAW)) {
+const [kf, kl] = (k + " ").split(" ");
+if (starts(kf, pf) && starts(kl, pl)) res.push(...arr);
+}
+entries = res.length ? res : undefined;
+}
+if (!entries) return { ok:false, message:"Kein Treffer für diesen Namen." };
+return { ok:true, first:f, last:l, tickets: groupPerTicket(entries) };
+}
+
+function renderNameResult(res) {
+if (!res.ok) {
+nameResult.innerHTML = `<div class="danger">${escapeHtml(res.message || "Fehler")}</div>`;
+return;
+}
+const full = escapeHtml((String(res.first||"").trim() + " " + String(res.last||"").trim()).trim());
+const cards = res.tickets.map(t => {
+const items = t.items.map(it => `<li>${escapeHtml(it.name)} <span class="small">× ${it.qty || 1}</span></li>`).join("");
+return `<div class="ticket"><h4>Ticket-ID: ${escapeHtml(t.ticketId)}</h4><ul>${items}</ul></div>`;
+}).join("");
+nameResult.innerHTML = `<div><strong>Name:</strong> ${full}</div>${cards || "<div class='small'>Keine Artikel gefunden.</div>"}`;
+}
+
+nameSearchBtn.addEventListener("click", () => renderNameResult(searchByName(firstInput.value, lastInput.value, !!prefixMatch.checked)));
+[firstInput, lastInput].forEach(el => el.addEventListener("keydown", (e) => { if (e.key === "Enter") nameSearchBtn.click(); }));
+
+/* ==============================
+CSV UPLOAD & SPALTENPICKER
+============================== */
+const loadCsvBtn = $("loadCsvBtn");
+const csvFile = $("csvFile");
+const colPicker = $("colPicker");
+const ticketSelect = $("ticketSelect");
+const itemSelect = $("itemSelect");
+const qtySelect = $("qtySelect");
+const firstSelect = $("firstSelect");
+const lastSelect = $("lastSelect");
+const applyColsBtn = $("applyColsBtn");
+
+const ticketColPill = $("ticketColPill");
+const itemColPill = $("itemColPill");
+const qtyColPill = $("qtyColPill");
+const firstColPill = $("firstColPill");
+const lastColPill = $("lastColPill");
+
+let _lastCSV = null;
+
+loadCsvBtn.addEventListener("click", () => csvFile.click());
+csvFile.addEventListener("change", (e) => handleFiles(e.target.files));
+
+function handleFiles(files) {
+if (!files || !files[0]) return;
+const f = files[0];
+Papa.parse(f, {
+header: true,
+dynamicTyping: false,
+skipEmptyLines: true,
+complete: (res) => onCSVParsed(res, f.name),
+error: (err) => alert("CSV Fehler: " + err)
+});
+}
+
+function onCSVParsed(res, filename) {
+const headers = res?.meta?.fields;
+const rows = res?.data || [];
+if (!headers) { alert("Konnte Spaltenüberschriften nicht erkennen."); return; }
+_lastCSV = { headers, rows };
+
+// Picker füllen
+[ticketSelect, itemSelect, firstSelect, lastSelect].forEach(sel => sel.innerHTML = "");
+qtySelect.innerHTML = '<option value="">(keine)</option>';
+headers.forEach(h => {
+[ticketSelect, itemSelect, firstSelect, lastSelect].forEach(sel => sel.appendChild(new Option(h, h)));
+qtySelect.appendChild(new Option(h, h));
+});
+
+// heuristische Defaults:
+ticketSelect.value = detectTicket(headers);
+itemSelect.value = detectItem(headers);
+qtySelect.value = detectQty(headers) || "";
+firstSelect.value = detectFirst(headers);
+lastSelect.value = detectLast(headers);
+
+// Pills & UI
+ticketColPill.textContent = ticketSelect.value;
+itemColPill.textContent = itemSelect.value;
+qtyColPill.textContent = qtySelect.value || "–";
+firstColPill.textContent = firstSelect.value;
+lastColPill.textContent = lastSelect.value;
+
+colPicker.style.display = "block";
+sourceLabel.textContent = "Hochgeladene CSV (" + filename + ")";
+}
+
+// Spaltenerkennung (BestellID bevorzugen)
+function detectTicket(headers) {
+const score = (c) => {
+const lc = c.toLowerCase().trim(); let s=0;
+if (lc === "bestellid" || lc === "bestell-id" || lc === "bestell id") s += 100;
+if (lc.includes("bestell")) s += 10;
+if (lc.includes("ticket")) s += 3;
+if (/\bid\b/.test(lc)) s += 2;
+if (lc.includes("qr")) s += 1;
+if (lc.includes("code")) s += 1;
+if (["id","ticket","ticket id","ticket_id","ticket-id"].includes(lc)) s += 3;
+return s;
+};
+return headers.slice().sort((a,b) => score(b)-score(a))[0];
+}
+function detectItem(headers) {
+const score = (c) => {
+const lc = c.toLowerCase().trim(); let s=0;
+["item","artikel","name","produkt","product","buchung","tarif","paket","ticketname","event","kategorie","beschreibung","ticket"].forEach(kw => { if (lc.includes(kw)) s+=1; });
+if (/\bid\b/.test(lc)) s -= 1;
+return s;
+};
+return headers.slice().sort((a,b) => score(b)-score(a))[0];
+}
+function detectQty(headers) {
+const score = (c) => {
+const lc = c.toLowerCase().trim(); let s=0;
+["qty","quantity","anzahl","menge","count","anz","stück","stueck"].forEach(kw => { if (lc.includes(kw)) s+=2; });
+if (/\bid\b/.test(lc)) s -= 1;
+return s;
+};
+const sorted = headers.slice().sort((a,b) => score(b)-score(a));
+return score(sorted[0]) > 0 ? sorted[0] : "";
+}
+function detectFirst(headers) {
+const score = (c) => {
+const lc = c.toLowerCase().trim(); let s=0;
+if (["first name","firstname","vorname"].includes(lc)) s+=5;
+if (lc.includes("first") || lc.includes("vorname")) s+=3;
+if (lc.includes("name")) s+=1;
+if (lc.includes("last") || lc.includes("nachname")) s-=1;
+return s;
+};
+return headers.slice().sort((a,b) => score(b)-score(a))[0];
+}
+function detectLast(headers) {
+const score = (c) => {
+const lc = c.toLowerCase().trim(); let s=0;
+if (["last name","lastname","nachname","familienname","surname"].includes(lc)) s+=5;
+if (lc.includes("last") || lc.includes("nachname") || lc.includes("surname")) s+=3;
+if (lc.includes("name")) s+=1;
+if (lc.includes("first") || lc.includes("vorname")) s-=1;
+return s;
+};
+return headers.slice().sort((a,b) => score(b)-score(a))[0];
+}
+
+function buildMappings(rows, ticketCol, itemCol, qtyCol, firstCol, lastCol) {
+const byTicket = {};
+const byName = {};
+const toKey = (f,l) => (String(f||"").trim() + " " + String(l||"").trim()).trim().toLowerCase();
+
+rows.forEach(r => {
+const tid = String(r?.[ticketCol] ?? "").trim();
+const item = String(r?.[itemCol] ?? "").trim();
+if (!tid || !item) return;
+let q = 1;
+if (qtyCol) {
+const raw = r?.[qtyCol];
+const n = parseFloat(String(raw).replace(",", "."));
+if (!Number.isNaN(n) && n > 0) q = n;
+}
+(byTicket[tid] ||= []).push({ name:item, qty:q });
+
+const first = r?.[firstCol], last = r?.[lastCol];
+const key = toKey(first, last);
+if (key) (byName[key] ||= []).push({ ticketId:tid, name:item, qty:q, first:first, last:last });
+});
+
+return { byTicket, byName };
+}
+
+applyColsBtn.addEventListener("click", () => {
+if (!_lastCSV) return;
+const tCol = ticketSelect.value;
+const iCol = itemSelect.value;
+const qCol = qtySelect.value || "";
+const fCol = firstSelect.value;
+const lCol = lastSelect.value;
+
+const maps = buildMappings(_lastCSV.rows, tCol, iCol, qCol, fCol, lCol);
+if (!Object.keys(maps.byTicket).length) { alert("Die gewählten Spalten ergeben keine Ticket-Zuordnung."); return; }
+
+TICKET_TO_ITEMS_RAW = maps.byTicket;
+NAME_TO_TICKETS_RAW = maps.byName;
+
+// Pills updaten
+ticketColPill.textContent = tCol;
+itemColPill.textContent = iCol;
+qtyColPill.textContent = qCol || "–";
+firstColPill.textContent = fCol;
+lastColPill.textContent = lCol;
+
+// Persistieren (optional)
+try {
+localStorage.setItem("ticket_mapping_v5", JSON.stringify({
+byTicket: TICKET_TO_ITEMS_RAW,
+byName: NAME_TO_TICKETS_RAW,
+ticketCol: tCol,
+itemCol: iCol,
+qtyCol: qCol || "",
+firstCol: fCol,
+lastCol: lCol,
+updatedAt: Date.now()
+}));
+sourceLabel.textContent = "Lokal gespeichert";
+} catch(e) {}
+
+refreshHeader();
+alert("Datensatz übernommen. Scanner, Ticketsuche & Namenssuche nutzen nun die neue CSV.");
+});
+
+// Drag & Drop
+const dropzone = $("dropzone");
+["dragenter", "dragover", "dragleave", "drop"].forEach(evt => dropzone.addEventListener(evt, e => { e.preventDefault(); e.stopPropagation(); }));
+["dragenter", "dragover"].forEach(evt => dropzone.addEventListener(evt, () => dropzone.style.borderColor = "#3b82f6"));
+["dragleave", "drop"].forEach(evt => dropzone.addEventListener(evt, () => dropzone.style.borderColor = "rgba(255,255,255,.2)"));
+dropzone.addEventListener("drop", (e) => { const dt = e.dataTransfer; if (dt && dt.files && dt.files.length) handleFiles(dt.files); });
+
+// Lokale Mappings löschen
+$("clearLocalBtn").addEventListener("click", () => {
+["ticket_mapping_v5","ticket_mapping_v4","ticket_mapping_v3","ticket_mapping_v2","ticket_mapping_v1"].forEach(k => localStorage.removeItem(k));
+alert("Lokales Mapping gelöscht. Seite lädt neu.");
+location.reload();
+});
+
+// Beim Start: Prüfe, ob es ein gespeichertes Mapping gibt
+(function initFromLocal() {
+try {
+const saved = JSON.parse(localStorage.getItem("ticket_mapping_v5") || "null");
+if (saved?.byTicket && saved?.byName) {
+TICKET_TO_ITEMS_RAW = saved.byTicket;
+NAME_TO_TICKETS_RAW = saved.byName;
+sourceLabel.textContent = "Lokal gespeichert";
+ticketColPill.textContent = saved.ticketCol || "–";
+itemColPill.textContent = saved.itemCol || "–";
+qtyColPill.textContent = saved.qtyCol || "–";
+firstColPill.textContent = saved.firstCol|| "–";
+lastColPill.textContent = saved.lastCol || "–";
+refreshHeader();
+return;
+}
+} catch(_) {}
+// Falls nichts gespeichert → Quelle anzeigen
+sourceLabel.textContent = Object.keys(TICKET_TO_ITEMS_RAW).length ? "Eingebettet" : "—";
+refreshHeader();
+})();
+</script>
+</body>
+</html>
